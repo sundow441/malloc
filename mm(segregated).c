@@ -105,17 +105,16 @@ int mm_init(void)
     heap_listp += (2 * WSIZE);                     // 초기 heap pointer를 prologue header 뒤로 옮긴다.
     // pointer가 header로 부터 다른 블록의 값을 가지고 오거나 이동을 용이하게 하기 위함
 
-    // heap에 블록을 할당하기 위해 가용 블록의 사이즈를 한 번 늘린다
+    if(extend_heap(4) == NULL) return -1;
+
+    // heap에 regular block을 할당하기 위해 가용 블록의 사이즈를 한 번 늘린다
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL) return -1;
     // last_bp = (char *)heap_listp;
 
     return 0;
 }
 
-/* 
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- */
+// bp를 증가시켜 블록을 할당하는 함수
 void *mm_malloc(size_t size)
 {
     int asize = ALIGN(size + SIZE_T_SIZE);
@@ -146,7 +145,7 @@ static void *extend_heap(size_t words)
     size_t size;
 
     size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE; //byte를 8의 배수로 맞추기 위해 홀수일 때 +1
-    if((long)(bp = mem_sbrk(size)) == -1) return NULL;
+    if((long)(bp = mem_sbrk(size)) == -1) return NULL; // size 만큼 heap 공간 요청
 
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
@@ -214,13 +213,14 @@ static void *coalesce(void *bp)
     return bp;
 }
 
-// free_list의 첫번째에 새로 만들어진 가용 블록을 추가하는 함수 
+// segregation_list에 새로 만들어진 가용 블록을 추가하는 함수 
 void insertBlock(void *bp, size_t size)
 {
-    int list = 0;
+    int list = 0; // 리스트의 인덱스
     void *search_ptr;
-    void *insert_ptr = NULL;
+    void *insert_ptr = NULL; // search_ptr의 값을 저장해놓는 용도(seach_ptr 이전 블록)
 
+    // segregation_list의 인덱스를 찾는 과정
     while((list < LISTLIMIT - 1) && (size > 1))
     {
         size >>= 1;
@@ -228,6 +228,7 @@ void insertBlock(void *bp, size_t size)
     }
 
     search_ptr = segregation_list[list];
+    // 오름차순으로 저장하기 위해 나보다 작으면 넘기고 나보다 크면 멈춤
     while((search_ptr != NULL) && (size > GET_SIZE(HDRP(search_ptr))))
     {
         insert_ptr = search_ptr;
@@ -236,34 +237,34 @@ void insertBlock(void *bp, size_t size)
 
     if(search_ptr !=NULL)
     {
-        if(insert_ptr != NULL)
+        if(insert_ptr != NULL) // 이전 블록이 존재하는 경우(리스트의 중간에 블록을 삽입하는 경우)
         {
             SUCC_FREEP(bp) = search_ptr;
             PREC_FREEP(bp) = insert_ptr;
             PREC_FREEP(search_ptr) = bp;
             SUCC_FREEP(insert_ptr) = bp;
         }
-        else
+        else // 이전 블록이 존재하지 않아(리스트에서 가장 작아) 리스트의 첫번째에 삽입하는 경우
         {
             SUCC_FREEP(bp) = search_ptr;
             PREC_FREEP(bp) = NULL;
             PREC_FREEP(search_ptr) = bp;
-            segregation_list[list] = bp;
+            segregation_list[list] = bp; // segregation_list 최신화
         }
     }
-    else
+    else // search_ptr이 NULL일 때
     {
-        if(insert_ptr != NULL)
+        if(insert_ptr != NULL) // 리스트에서 가장 커 리스트의 마지막에 삽입하는 경우
         {
             SUCC_FREEP(bp) = NULL;
             PREC_FREEP(bp) = insert_ptr;
             SUCC_FREEP(insert_ptr) = bp;
         }
-        else
+        else // 리스트가 비어있어 처음으로 삽입하는 경우
         {
             SUCC_FREEP(bp) = NULL;
             PREC_FREEP(bp) = NULL;
-            segregation_list[list] = bp;
+            segregation_list[list] = bp; // segregation_list 최신화
         }
     }
 
@@ -273,37 +274,38 @@ void insertBlock(void *bp, size_t size)
 // 할당되거나 연결되는 가용 블록을 free_list에서 제거하는 함수
 void removeBlock(void *bp)
 {
-    int list = 0;
+    int list = 0; // 리스트의 인덱스
     size_t size = GET_SIZE(HDRP(bp));
 
+    // segregation_list의 인덱스를 찾는 과정
     while((list < LISTLIMIT - 1) && (size > 1))
     {
         size >>= 1;
         list++;
     }
 
-    if(SUCC_FREEP(bp) != NULL)
+    if(SUCC_FREEP(bp) != NULL) // 다음 블록이 연결되어 있는 경우
     {
-        if(PREC_FREEP(bp) != NULL)
+        if(PREC_FREEP(bp) != NULL) // 이전 블록이 연결되어 있는 경우(리스트 중간의 블록을 지우는 경우)
         {
             PREC_FREEP(SUCC_FREEP(bp)) = PREC_FREEP(bp);
             SUCC_FREEP(PREC_FREEP(bp)) = SUCC_FREEP(bp);
         }
-        else
+        else // 이전 블록이 연결되어 있지 않은 경우(리스트 첫 번째 블록을 지우는 경우)
         {
             PREC_FREEP(SUCC_FREEP(bp)) = NULL;
-            segregation_list[list] = SUCC_FREEP(bp);
+            segregation_list[list] = SUCC_FREEP(bp); // segregation_list 포인터를 다음 블록으로 변경
         }
     }
-    else
+    else // 다음 블록이 연결되지 않은 경우(NULL)
     {
-        if(PREC_FREEP(bp) != NULL)
+        if(PREC_FREEP(bp) != NULL) // 이전 블록이 연결되어 있는 경우(리스트 마지막 블록을 지우는 경우)
         {
             SUCC_FREEP(PREC_FREEP(bp)) = NULL;
         }
-        else
+        else // 애초에 리스트에 블록이 하나만 존재할 경우
         {
-            segregation_list[list] = NULL;
+            segregation_list[list] = NULL; // segregation_list 포인터를 NULL로 변경
         }
     }
 
